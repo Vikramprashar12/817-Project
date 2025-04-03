@@ -22,7 +22,7 @@ class ServerGUI:
         self.tab_conn = ttk.Frame(tab_control)
         tab_control.add(self.tab_conn, text='Connections & Auth')
 
-        self.conn_tree = ttk.Treeview(self.tab_conn, columns=('Username', 'Action', 'IP', 'Time'), show='headings')
+        self.conn_tree = ttk.Treeview(self.tab_conn, columns=('Username', 'Action', 'Port', 'Time'), show='headings')
         for col in self.conn_tree["columns"]:
             self.conn_tree.heading(col, text=col)
         self.conn_tree.pack(expand=True, fill='both', padx=10, pady=10)

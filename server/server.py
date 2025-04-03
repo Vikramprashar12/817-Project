@@ -44,7 +44,7 @@ def handle_client(conn, addr, connection_log, transaction_log):
 
                 if USER_DATABASE.get(username) == password:
                     conn.sendall("SUCCESS".encode())
-                    log_connection_event(connection_log, username, "login", addr[0])
+                    log_connection_event(connection_log, username, "login", addr[1])
                 else:
                     conn.sendall("FAIL".encode())
             elif data.startswith("REGISTER:"):
@@ -58,7 +58,7 @@ def handle_client(conn, addr, connection_log, transaction_log):
                     USER_DATABASE[username] = password
                     save_users(USER_DATABASE)
                     conn.sendall("SUCCESS".encode())
-                    log_connection_event(connection_log, username, "register", addr[0])
+                    log_connection_event(connection_log, username, "register", addr[1])
             else:
                 conn.sendall("UNKNOWN_COMMAND".encode())
     except Exception as e:
