@@ -27,6 +27,7 @@ def send_register(socket_conn, username, password):
         "password":f"{password}"
     }
     print(f"[DEBUG] Sending: {message}")
+    
 
     socket_conn.sendall(json.dumps(message).encode())
     response = socket_conn.recv(1024).decode()
