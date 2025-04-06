@@ -21,7 +21,7 @@ USER_FILE = "users.json"
 
 db_lock = threading.Lock()
 
-server_nonces = []
+server_nonces = {}
 server_nonces_lock = threading.Lock()
 nonce_ceiling = 10000000
 
@@ -63,11 +63,18 @@ def generate_nonce():
         rand_int = secrets.randbelow(nonce_ceiling)
         # generate nonce repetitively until we get a unique value not in our server nonces
         while(True):
-            if rand_int not in server_nonces:
+            if rand_int not in server_nonces.keys():
                 break
             rand_int = secrets.randbelow(nonce_ceiling)
-        server_nonces.append(rand_int)
+        server_nonces[rand_int] = False
         return rand_int
+    
+def append_server_nonce(nonce: int):
+    with server_nonces_lock:
+        if server_nonces[nonce]:
+            print("that nonce has already been used!")
+        else:
+            server_nonces[nonce] = True
 
 # ensure a string is 16 bytes 
 def pad_string_to_16_bytes(string: str):
@@ -130,7 +137,7 @@ def generate_enc_and_MAC_key(master_secret: bytes, pre_master_secret: bytes):
 # IV must be 16 bytes
 
 # decrypt data encrypted with shared key (K_s)
-def decrypt_with_K_s(encr_data: bytes, key: bytes, IV: bytes):
+def decrypt_with_AES_key(encr_data: bytes, key: bytes, IV: bytes):
     cipher = Cipher(algorithms.AES(key), modes.CBC(IV), backend=default_backend())
     decryptor = cipher.decryptor()
     decrypted_data = decryptor.update(encr_data) + decryptor.finalize()
@@ -139,7 +146,7 @@ def decrypt_with_K_s(encr_data: bytes, key: bytes, IV: bytes):
     return unpadded_data.decode('utf-8')
 
 # encrypt data with shared key (K_s)
-def encrypt_with_K_s(data: bytes, key: bytes, IV: bytes):
+def encrypt_with_AES_key(data: bytes, key: bytes, IV: bytes):
     data_bytes= data.encode('utf-8')
     padder = padding.PKCS7(128).padder()  # AES block size is 128 bits (16 bytes)
     padded_data = padder.update(data_bytes) + padder.finalize()
@@ -157,7 +164,7 @@ def secure_receive(message_json: dict, ENC_KEY: bytes, MAC_KEY: bytes) -> dict:
     if not hmac.compare_digest(received_mac, expected_mac):
         raise Exception("MAC verification failed!")
 
-    plaintext = decrypt_with_K_s(ciphertext, ENC_KEY, iv)
+    plaintext = decrypt_with_AES_key(ciphertext, ENC_KEY, iv)
 
     return json.loads(plaintext)
 
@@ -167,7 +174,7 @@ def secure_send(response_dict: dict, ENC_KEY: bytes, MAC_KEY: bytes) -> dict:
 
     plaintext = json.dumps(response_dict)
 
-    ciphertext = encrypt_with_K_s(plaintext, ENC_KEY, iv)
+    ciphertext = encrypt_with_AES_key(plaintext, ENC_KEY, iv)
 
     mac = hmac.new(MAC_KEY, iv + ciphertext, hashlib.sha256).hexdigest()
 
@@ -209,7 +216,12 @@ PORT = 8888
 # generate shared symmetric AES key
 def handle_client(conn: socket.socket, addr, connection_log: list, transaction_log: list):
     print(f"[+] Connection from {addr}")
-    authenticated = True
+    authenticated = False
+    K_s = None
+    init_vector = None
+    encryption_key = None
+    MAC_key = None
+    atm_number = None
     try:
         while True:
             data = conn.recv(1024).decode()
@@ -217,11 +229,67 @@ def handle_client(conn: socket.socket, addr, connection_log: list, transaction_l
                 break
             message = json.loads(data)
             print(f"message:{message}")
+            if K_s is None:
+                K_s = generate_server_ATM_shared_key(int(message["atm_number"]))
+                atm_number = int(message["atm_number"])
+                init_vector = message["init_vector"].encode('utf-8')
+            # if they're not authenticated and they aren't attempting to login or signup
+            if not authenticated and (message["type"] != "login" or message["type"] != "signup"):
+                # then run authentication protocol
 
-            if not authenticated and message["type"] != "login" and message["type"] != "signup":
-                conn.sendall("AUTH failed".encode())
-                break
+                # if they arent sending an auth message, break
+                if message["type"]!= "auth":
+                    print("must authenticate before proceeding")
+                    conn.sendall("AUTH failed".encode())
+                    break    
+                
+                # else, run auth protocol
+                # auth protocol = receive 3 messages, send 2
 
+                # message 1: E(K_s, [username, password, N_atm]) (client -> server)
+                auth_payload_recv = json.loads(decrypt_with_AES_key(message["encr_payload"], K_s, init_vector))
+                client_nonce = int(auth_payload_recv["N_atm"])
+
+                # message 2: E(K_s, [N_s, N_atm]) (server -> client)
+                server_nonce = generate_nonce()
+                auth_payload_send = {
+                    "N_s" : server_nonce,
+                    "N_atm" : client_nonce
+                }
+
+                server_response = json.dumps({
+                    "type" : "auth", 
+                    "encr_payload" : encrypt_with_AES_key(json.dumps(auth_payload_send), K_s, init_vector)
+                    })
+                conn.sendall(server_response.encode())
+
+                # message 3: N_s (client -> server)
+                message = json.loads(conn.recv(1024).decode())
+                auth_payload_recv = json.loads(decrypt_with_AES_key(message["encr_payload"], K_s, init_vector))
+                # check client's challenge
+                if message["status"] == "failure":
+                    print("we failed client's challenge")
+                    break 
+                # check client's response to our challenge
+                if int(message["N_s"]) != server_nonce:
+                    conn.sendall("AUTH failed".encode())
+                    break 
+                # if its equal to N_s
+                server_response = json.dumps({
+                    "type" : "auth",
+                    "status" : "success"
+                })
+                # message 4: auth successfuly! (server -> client)
+                conn.sendall(server_response.encode())
+                
+                # message 5: E(K_s, pms) (client -> server)
+                auth_payload_recv = json.loads(decrypt_with_AES_key(message["encr_payload"], K_s, init_vector))
+                pre_master_secret = auth_payload_recv["pms"]
+                master_secret = generate_master_secret_from_pms(pre_master_secret, atm_number, client_nonce, server_nonce)
+                encryption_key, MAC_key = generate_enc_and_MAC_key(master_secret, pre_master_secret)
+                # auth complete, now generate master secret, shared keys
+                authenticated = True
+                # TODO: generate master secret, encryption, MAC key
 
             if message["type"] == "login":
                 username = message["username"].strip()
