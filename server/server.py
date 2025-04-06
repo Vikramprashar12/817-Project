@@ -18,11 +18,14 @@ import secrets
 
 # use the db_lock to read/write to/from users.json file to allow for synchronization
 USER_FILE = "users.json"
+
 db_lock = threading.Lock()
 
 server_nonces = []
 server_nonces_lock = threading.Lock()
 nonce_ceiling = 10000000
+
+iter = 10000
 
 def load_users():
     if os.path.exists(USER_FILE):
@@ -44,15 +47,16 @@ def generate_server_ATM_shared_key(atm_number: int):
     salt_str = os.getenv(f"ATM_{atm_number}_SALT")
     salt_bytes = salt_str.encode()
     # derive key
-    kdf = pbkdf2_hmac(
+    kdf = PBKDF2HMAC(
         algorithms = hashes.SHA256(),
         length = 32,
         salt = salt_bytes,
-        iterations = 10000,
+        iterations = iter,
     )
 
     return kdf.derive(shared_secret_bytes)
-    
+
+# generate and append a random int to server_nonces (thread safe)
 def generate_nonce():
     # thread safe lock
     with server_nonces_lock:
@@ -65,12 +69,42 @@ def generate_nonce():
         server_nonces.append(rand_int)
         return rand_int
 
+# ensure a string is 16 bytes 
+def pad_string_to_16_bytes(string: str):
+    string_bytes = string.encode('utf-8')
+    if len(string_bytes) == 16:
+        return string_bytes
+    elif len(string_bytes) > 16:
+        return string_bytes[:16]
+    else:
+        padder = padding.PKCS7(128).padder()
+        return padder.update(string_bytes) + padder.finalize()
+        
+# generates master secret from 
+def generate_master_secret_from_pms(pre_master_secret: str, atm_number: int, client_nonce: int, server_nonce: int) -> bytes:
+    iter = 10000
+    # for now let the salt be from the .env file
+    salt_str = str(os.getenv(f"ATM_{atm_number}_SALT"))
+    # add the nonces to pre master secret
+    pre_master_secret += f"{client_nonce}{server_nonce}"
+    pre_master_secret_bytes = pre_master_secret.encode('utf-8')
+    salt_bytes = pad_string_to_16_bytes(salt_str)
+    
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,  
+        salt=salt_bytes,
+        iterations=iter
+    )
+    
+    # Derive the master scret
+    master_secret = kdf.derive(pre_master_secret_bytes)
+    return master_secret
+
 """ 
 this method will output a 256 bit AES key (our encryption key) and a 256 bit MAC key
-
 """
 def generate_enc_and_MAC_key(master_secret: bytes, pre_master_secret: bytes):
-    iter = 10000
     # use the first 16 bytes of pre master secret as salt for our keys to ensure they are symmetric
     pre_master_salt = pre_master_secret[:16]
     aes_kdf = PBKDF2HMAC(
@@ -183,9 +217,11 @@ def handle_client(conn: socket.socket, addr, connection_log: list, transaction_l
                 break
             message = json.loads(data)
             print(f"message:{message}")
+
             if not authenticated and message["type"] != "login" and message["type"] != "signup":
                 conn.sendall("AUTH failed".encode())
                 break
+
 
             if message["type"] == "login":
                 username = message["username"].strip()
