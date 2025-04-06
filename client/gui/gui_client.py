@@ -50,17 +50,23 @@ class ATMClientGUI:
 
         if user and pwd:
             try:
-                sock = client_socket.connect_to_server()
-                result = client_socket.send_login(sock, user, pwd)
-
-                if result == "SUCCESS":
+                sock = client_socket.connect_to_server(self.session)
+                result = client_socket.perform_secure_login(sock, user, pwd, self.session)
+                print(f"[DEBUG] Server response: {result}")
+                if result:
                     self.session.username = user
                     self.session.socket = sock
                     self.create_main_menu_frame()
+
+                    print("[DEBUG] Secure Session State:")
+                    print(f"  Username: {self.session.username}")
+                    print(f"  ENC Key: {self.session.encryption_key.hex()}")
+                    print(f"  MAC Key: {self.session.mac_key.hex()}")
+
                 else:
                     messagebox.showerror("Login Failed", "Invalid credentials.")
             except Exception as e:
-                messagebox.showerror("Error", f"Connection failed: {e}")
+                messagebox.showerror("Error", f"Login Failed failed: {e}")
         else:
             messagebox.showerror("Error", "Please enter both username and password.")
     
@@ -74,13 +80,13 @@ class ATMClientGUI:
 
         if user and pwd:
             try:
-                sock = client_socket.connect_to_server()
+                sock = client_socket.connect_to_server(self.session)
                 print("[DEBUG] Connected to server")
 
-                result = client_socket.send_register(sock, user, pwd)
+                result = client_socket.perform_secure_register(sock, user, pwd, self.session)
                 print(f"[DEBUG] Server response: {result}")
 
-                if result == "SUCCESS":
+                if result:
                     messagebox.showinfo("Registered", "Account created! You can now log in.")
                 else:
                     messagebox.showerror("Error", "Username already exists.")
@@ -90,6 +96,67 @@ class ATMClientGUI:
         else:
             messagebox.showerror("Error", "Please enter both username and password.")
 
+    def handle_deposit(self):
+        amount = self.amount.get()
+        if not amount.isdigit():
+            self.show_message("Invalid amount.")
+            return
+
+        try:
+            result = client_socket.send_transaction(
+                self.session.socket,
+                self.session.username,
+                action="deposit",
+                amount=int(amount),
+                ENC_KEY=self.session.encryption_key,
+                MAC_KEY=self.session.mac_key
+            )
+
+            if result["status"] == "SUCCESS":
+                self.show_message(f"Deposited ${amount}. New balance: ${result['balance']}")
+            else:
+                self.show_message("Deposit failed.")
+        except Exception as e:
+            self.show_message(f"Error: {e}")
+
+    def handle_withdraw(self):
+        amount = self.amount.get()
+        if not amount.isdigit():
+            self.show_message("Invalid amount.")
+            return
+
+        try:
+            result = client_socket.send_transaction(
+                self.session.socket,
+                self.session.username,
+                action="withdraw",
+                amount=int(amount),
+                ENC_KEY=self.session.encryption_key,
+                MAC_KEY=self.session.mac_key
+            )
+            if result["status"] == "SUCCESS":
+                self.show_message(f"Withdrew ${amount}. New balance: ${result['balance']}")
+            else:
+                self.show_message(result.get("message", "Withdrawal failed."))
+        except Exception as e:
+            self.show_message(f"Error: {e}")
+
+    def balance_inquiry(self):
+        try:
+            result = client_socket.send_transaction(
+                self.session.socket,
+                self.session.username,
+                action="balance_inquiry",
+                ENC_KEY=self.session.encryption_key,
+                MAC_KEY=self.session.mac_key
+            )
+            if result["status"] == "SUCCESS":
+                self.show_message(f"Your balance is: ${result['balance']}")
+            else:
+                self.show_message("Failed to get balance.")
+        except Exception as e:
+            self.show_message(f"Error: {e}")
+
     def create_main_menu_frame(self):
         self.clear_root()
         self.menu_frame = tk.Frame(self.root)
@@ -98,21 +165,12 @@ class ATMClientGUI:
         tk.Label(self.menu_frame, text="Amount").grid(row=0, column=0, pady=5)
         tk.Entry(self.menu_frame, textvariable=self.amount).grid(row=0, column=1, pady=5)
 
-        tk.Button(self.menu_frame, text="Deposit", command=self.deposit).grid(row=1, column=0, pady=5)
-        tk.Button(self.menu_frame, text="Withdraw", command=self.withdraw).grid(row=1, column=1, pady=5)
+        tk.Button(self.menu_frame, text="Deposit", command=self.handle_deposit).grid(row=1, column=0, pady=5)
+        tk.Button(self.menu_frame, text="Withdraw", command=self.handle_withdraw).grid(row=1, column=1, pady=5)
         tk.Button(self.menu_frame, text="Balance Inquiry", command=self.balance_inquiry).grid(row=2, columnspan=2, pady=5)
 
         self.message_label = tk.Label(self.menu_frame, text="", fg="blue")
         self.message_label.grid(row=3, columnspan=2, pady=10)
-
-    def deposit(self):
-        self.show_message(f"Deposit requested for ${self.amount.get()}")
-
-    def withdraw(self):
-        self.show_message(f"Withdraw requested for ${self.amount.get()}")
-
-    def balance_inquiry(self):
-        self.show_message("Balance inquiry requested")
 
     def show_message(self, msg):
         self.message_label.config(text=msg)
